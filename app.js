@@ -98,12 +98,8 @@ class LifeHub {
             this.renderAssetTrajectory();
         });
         
-        // Modal close
-        document.getElementById('modal-overlay').addEventListener('click', (e) => {
-            if (e.target.id === 'modal-overlay') {
-                this.closeModal();
-            }
-        });
+        // Modal close with confirmation
+        this.initializeModalHandlers();
     }
     
     switchModule(module) {
@@ -232,8 +228,12 @@ class LifeHub {
     addEventsToCell(cell, date, hour) {
         const dateStr = this.formatDateISO(date);
         
+        const startOfWeek = this.getStartOfWeek(this.currentWeek);
+        const endOfWeek = new Date(startOfWeek);
+        endOfWeek.setDate(startOfWeek.getDate() + 6);
+        
         // Get all events for this date (including recurring instances)
-        const allEvents = this.getAllEventsForDate(date);
+        const allEvents = this.getAllEventsForDateInWeek(date, startOfWeek, endOfWeek);
         
         allEvents.forEach(event => {
             const eventStart = parseInt(event.startTime.split(':')[0]);
@@ -266,7 +266,7 @@ class LifeHub {
         });
     }
     
-    getAllEventsForDate(targetDate) {
+    getAllEventsForDateInWeek(targetDate, weekStart, weekEnd) {
         const result = [];
         const targetDateStr = this.formatDateISO(targetDate);
         
@@ -278,7 +278,7 @@ class LifeHub {
             
             // Add recurring instances if applicable
             if (event.recurring && event.recurringFrequency) {
-                const instances = this.generateRecurringInstances(event, targetDate);
+                const instances = this.generateRecurringInstances(event, weekStart, weekEnd);
                 result.push(...instances.filter(instance => instance.date === targetDateStr));
             }
         });
@@ -286,48 +286,62 @@ class LifeHub {
         return result;
     }
     
-    generateRecurringInstances(event, targetDate) {
+    generateRecurringInstances(event, weekStart, weekEnd) {
+        if (!event.recurring) return [];
+        
         const instances = [];
-        const eventDate = new Date(event.date);
-        const endDate = event.endRecurring ? new Date(event.endRecurring) : new Date();
-        endDate.setMonth(endDate.getMonth() + 12); // Generate for next 12 months
+        let current = new Date(event.date + 'T00:00:00');
+        const end = event.endRecurring ? new Date(event.endRecurring + 'T00:00:00') : weekEnd;
         
-        let current = new Date(eventDate);
-        
-        while (current <= endDate) {
-            if (current > eventDate) { // Don't include the original date
-                const dayOfWeek = current.getDay();
-                let shouldInclude = false;
+        while (current <= end && current <= weekEnd) {
+            if (current >= weekStart && this.formatDateISO(current) !== event.date) {
                 
-                switch (event.recurringFrequency) {
-                    case 'daily':
-                        shouldInclude = true;
-                        break;
-                    case 'weekly':
-                        shouldInclude = event.selectedDays && event.selectedDays[dayOfWeek];
-                        break;
-                    case 'biweekly':
-                        const weeksDiff = Math.floor((current - eventDate) / (7 * 24 * 60 * 60 * 1000));
-                        shouldInclude = event.selectedDays && event.selectedDays[dayOfWeek] && weeksDiff % 2 === 0;
-                        break;
-                    case 'monthly':
-                        shouldInclude = current.getDate() === eventDate.getDate();
-                        break;
-                }
-                
-                if (shouldInclude) {
+                // Check if this day matches selected days
+                if (event.recurringFrequency === 'weekly' || event.recurringFrequency === 'biweekly') {
+                    const dayOfWeek = current.getDay(); // 0=Sun, 1=Mon, etc
+                    
+                    if (event.selectedDays && event.selectedDays[dayOfWeek]) {
+                        instances.push({
+                            ...event,
+                            date: this.formatDateISO(current),
+                            isInstance: true
+                        });
+                    }
+                } else if (event.recurringFrequency === 'daily') {
                     instances.push({
                         ...event,
                         date: this.formatDateISO(current),
                         isInstance: true
                     });
+                } else if (event.recurringFrequency === 'monthly') {
+                    // Only on same day of month as original
+                    if (current.getDate() === new Date(event.date).getDate()) {
+                        instances.push({
+                            ...event,
+                            date: this.formatDateISO(current),
+                            isInstance: true
+                        });
+                    }
                 }
             }
             
-            // Move to next day
-            current.setDate(current.getDate() + 1);
+            // Increment by 1 day for daily/weekly/biweekly to check each day
+            if (event.recurringFrequency === 'daily' || event.recurringFrequency === 'weekly' || event.recurringFrequency === 'biweekly') {
+                current.setDate(current.getDate() + 1);
+                
+                // For bi-weekly, after checking 14 days, jump to next cycle
+                if (event.recurringFrequency === 'biweekly') {
+                    const daysSinceStart = Math.floor((current - new Date(event.date)) / 86400000);
+                    if (daysSinceStart % 14 === 0 && daysSinceStart > 0) {
+                        // Already at start of next cycle, continue
+                    }
+                }
+            } else if (event.recurringFrequency === 'monthly') {
+                current.setMonth(current.getMonth() + 1);
+            }
             
-            if (current > new Date('2030-12-31')) break; // Safety limit
+            // Safety limit
+            if (current > new Date('2030-12-31')) break;
         }
         
         return instances;
@@ -388,31 +402,39 @@ class LifeHub {
                         <option value="monthly" ${event?.recurringFrequency === 'monthly' ? 'selected' : ''}>Monthly</option>
                     </select>
                 </div>
-                <div class="form-group custom-days-options recurring-options" style="display: ${(event?.recurring && (event?.recurringFrequency === 'weekly' || event?.recurringFrequency === 'biweekly')) ? 'block' : 'none'}">
+                <div id="customDaysSelector" class="form-group custom-days-options recurring-options" style="display: ${(event?.recurring && (event?.recurringFrequency === 'weekly' || event?.recurringFrequency === 'biweekly')) ? 'block' : 'none'}">
                     <label class="form-label">Select Days</label>
-                    <div class="checkbox-group">
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="0" ${event?.selectedDays?.[0] ? 'checked' : ''}> Sunday
+                    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin:16px 0;padding:16px;background:#f9f9f9;border-radius:12px">
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="0" name="selectedDays" value="0" ${event?.selectedDays?.[0] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Sun</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="1" ${event?.selectedDays?.[1] ? 'checked' : ''}> Monday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="1" name="selectedDays" value="1" ${event?.selectedDays?.[1] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Mon</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="2" ${event?.selectedDays?.[2] ? 'checked' : ''}> Tuesday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="2" name="selectedDays" value="2" ${event?.selectedDays?.[2] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Tue</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="3" ${event?.selectedDays?.[3] ? 'checked' : ''}> Wednesday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="3" name="selectedDays" value="3" ${event?.selectedDays?.[3] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Wed</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="4" ${event?.selectedDays?.[4] ? 'checked' : ''}> Thursday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="4" name="selectedDays" value="4" ${event?.selectedDays?.[4] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Thu</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="5" ${event?.selectedDays?.[5] ? 'checked' : ''}> Friday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="5" name="selectedDays" value="5" ${event?.selectedDays?.[5] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Fri</span>
                         </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" name="selectedDays" value="6" ${event?.selectedDays?.[6] ? 'checked' : ''}> Saturday
+                        <label style="text-align:center;cursor:pointer">
+                            <input type="checkbox" class="day-checkbox" data-day="6" name="selectedDays" value="6" ${event?.selectedDays?.[6] ? 'checked' : ''} style="display:block;margin:4px auto">
+                            <span style="font-size:0.9rem">Sat</span>
                         </label>
                     </div>
+                    <div id="daysSummary" style="margin-top:8px;font-size:0.85rem;color:#667eea"></div>
                 </div>
                 <div class="form-group recurring-options" style="display: ${event?.recurring ? 'block' : 'none'}">
                     <label class="form-label">End Date (optional)</label>
@@ -421,7 +443,7 @@ class LifeHub {
                 <div style="display: flex; gap: 12px; margin-top: 24px;">
                     <button type="submit" class="btn-primary" style="flex: 1;">${isEdit ? 'Update' : 'Create'} Event</button>
                     ${isEdit ? '<button type="button" class="btn-danger" onclick="lifeHub.deleteEvent(' + event.id + ')">Delete</button>' : ''}
-                    <button type="button" class="btn-secondary" onclick="lifeHub.closeModal()">Cancel</button>
+                    <button type="button" class="btn-secondary" onclick="lifeHub.closeModalWithConfirm()">Cancel</button>
                 </div>
             </form>
         `;
@@ -451,6 +473,13 @@ class LifeHub {
         recurringCheckbox.addEventListener('change', updateRecurringDisplay);
         frequencySelect.addEventListener('change', updateRecurringDisplay);
         
+        // Setup days summary update
+        document.querySelectorAll('.day-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', () => this.updateDaysSummary());
+        });
+        
+        this.updateDaysSummary();
+        
         // Setup form submission
         document.getElementById('event-form').addEventListener('submit', (e) => {
             e.preventDefault();
@@ -460,12 +489,20 @@ class LifeHub {
     
     saveEvent(formData, eventId = null) {
         // Process selected days for weekly/biweekly frequency
-        const selectedDays = [false, false, false, false, false, false, false];
+        const selectedDays = [false, false, false, false, false, false, false]; // Sun-Sat
         const frequency = formData.get('recurringFrequency');
+        
         if (frequency === 'weekly' || frequency === 'biweekly') {
             formData.getAll('selectedDays').forEach(day => {
-                selectedDays[parseInt(day)] = true;
+                const dayIndex = parseInt(day);
+                selectedDays[dayIndex] = true;
             });
+            
+            // Validation: At least one day must be selected
+            if (!selectedDays.includes(true)) {
+                alert('Please select at least one day for recurring event');
+                return;
+            }
         }
         
         const eventData = {
@@ -3694,6 +3731,103 @@ class LifeHub {
         `;
     }
     
+    // Modal confirmation handlers
+    initializeModalHandlers() {
+        const overlay = document.getElementById('modal-overlay');
+        
+        overlay.addEventListener('click', (event) => {
+            // Only trigger if clicking the overlay itself (not modal content)
+            if (event.target === overlay) {
+                // Check if any form inputs have values
+                const hasInput = this.checkForUnsavedInput();
+                
+                if (hasInput) {
+                    // Show confirmation dialog
+                    if (confirm('Exit without saving? All changes will be lost.')) {
+                        this.closeModal();
+                    }
+                    // If user clicks "Cancel", modal stays open
+                } else {
+                    // No input, close immediately
+                    this.closeModal();
+                }
+            }
+        });
+    }
+    
+    checkForUnsavedInput() {
+        const modal = document.getElementById('modal-content');
+        
+        // Check all text inputs
+        const textInputs = modal.querySelectorAll('input[type="text"], input[type="number"], input[type="date"], input[type="time"], input[type="email"]');
+        for (let input of textInputs) {
+            if (input.value.trim() !== '' && input.value !== input.defaultValue) {
+                return true;
+            }
+        }
+        
+        // Check textareas
+        const textareas = modal.querySelectorAll('textarea');
+        for (let textarea of textareas) {
+            if (textarea.value.trim() !== '' && textarea.value !== textarea.defaultValue) {
+                return true;
+            }
+        }
+        
+        // Check selects (if changed from default)
+        const selects = modal.querySelectorAll('select');
+        for (let select of selects) {
+            if (select.selectedIndex !== 0) {
+                return true;
+            }
+        }
+        
+        // Check checkboxes
+        const checkboxes = modal.querySelectorAll('input[type="checkbox"]');
+        for (let checkbox of checkboxes) {
+            if (checkbox.checked !== checkbox.defaultChecked) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    closeModalWithConfirm() {
+        const hasInput = this.checkForUnsavedInput();
+        if (hasInput) {
+            if (confirm('Discard changes?')) {
+                this.closeModal();
+            }
+        } else {
+            this.closeModal();
+        }
+    }
+    
+    updateDaysSummary() {
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const selected = [];
+        
+        document.querySelectorAll('.day-checkbox').forEach(checkbox => {
+            if (checkbox.checked) {
+                const dayIndex = parseInt(checkbox.getAttribute('data-day'));
+                selected.push(days[dayIndex]);
+            }
+        });
+        
+        const summary = document.getElementById('daysSummary');
+        if (summary) {
+            if (selected.length > 0) {
+                summary.textContent = 'Repeats on: ' + selected.join(', ');
+                summary.style.color = '#667eea';
+                summary.style.fontWeight = '600';
+            } else {
+                summary.textContent = 'Select at least one day';
+                summary.style.color = '#ff3b30';
+            }
+        }
+    }
+
     // UTILITY METHODS
     saveData() {
         // Auto-save after every change to memory variables
