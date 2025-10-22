@@ -698,6 +698,28 @@ body {
     background: var(--color-bg-3);
 }
 
+/* Day selector styling */
+.day-checkbox:checked + span {
+    font-weight: 700;
+    color: #667eea;
+}
+
+label:has(.day-checkbox:checked) {
+    background: #e3f2fd;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+/* Alternative fallback for browsers without :has() support */
+.day-checkbox:checked {
+    accent-color: #667eea;
+}
+
+.day-checkbox:checked ~ span {
+    font-weight: 700;
+    color: #667eea;
+}
+
 @media (max-width: 768px) {
     .nav-container {
         flex-direction: column;
